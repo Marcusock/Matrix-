@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Matrixé — Parlez librement</title>
+
+<style>
+body {
+  margin: 0;
+  background: #000;
+  color: #00ff00;
+  font-family: monospace;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+header {
+  text-align: center;
+  padding: 20px 10px;
+  border-bottom: 1px solid #00ff00;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 28px;
+  letter-spacing: 2px;
+}
+
+header p {
+  margin: 5px 0 0;
+  font-size: 14px;
+  opacity: 0.8;
+}
+
+#intro {
+  padding: 20px;
+  text-align: center;
+}
+
+#intro p {
+  margin: 10px 0;
+}
+
+#start {
+  margin-top: 20px;
+  padding: 12px;
+  width: 100%;
+  background: #000;
+  color: #00ff00;
+  border: 1px solid #00ff00;
+}
+
+#setup {
+  display: none;
+  padding: 15px;
+}
+
+textarea {
+  width: 100%;
+  height: 110px;
+  background: #000;
+  color: #00ff00;
+  border: 1px solid #00ff00;
+  margin-top: 10px;
+}
+
+button {
+  background: #000;
+  color: #00ff00;
+  border: 1px solid #00ff00;
+  padding: 10px;
+  margin-top: 8px;
+  width: 100%;
+}
+
+#chatContainer {
+  flex: 1;
+  display: none;
+  flex-direction: column;
+}
+
+#chat {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px;
+}
+
+.msg-you {
+  text-align: right;
+  margin: 6px 0;
+}
+
+.msg-peer {
+  text-align: left;
+  margin: 6px 0;
+}
+
+.bubble {
+  display: inline-block;
+  padding: 8px 12px;
+  border: 1px solid #00ff00;
+  border-radius: 8px;
+  max-width: 70%;
+}
+
+#inputBar {
+  display: flex;
+  border-top: 1px solid #00ff00;
+}
+
+#msg {
+  flex: 1;
+  background: #000;
+  color: #00ff00;
+  border: none;
+  padding: 12px;
+}
+
+#send {
+  width: 80px;
+  border-left: 1px solid #00ff00;
+}
+</style>
+</head>
+
+<body>
+<header>
+  <h1>MATRIXÉ</h1>
+  <p>Parlez librement.</p>
+</header>
+
+<div id="intro">
+  <p>Matrixé est une messagerie chiffrée de bout en bout.</p>
+  <p>Vos messages sont protégés avant même de quitter votre appareil.</p>
+  <p>Aucun serveur ne peut les lire.</p>
+  <button id="start" onclick="startApp()">Démarrer</button>
+</div>
+
+<div id="setup">
+  <p>
+    1) Clique sur <b>Créer une offre</b><br>
+    2) Envoie le bloc à ton ami<br>
+    3) Colle sa réponse et clique <b>Appliquer</b>
+  </p>
+
+  <textarea id="signal" placeholder="Bloc d’échange ici"></textarea>
+  <button onclick="createOffer()">Créer une offre</button>
+  <button onclick="applyRemote()">Appliquer</button>
+</div>
+
+<div id="chatContainer">
+  <div id="chat"></div>
+  <div id="inputBar">
+    <input id="msg" placeholder="Message…">
+    <button id="send" onclick="sendMsg()">OK</button>
+  </div>
+</div>
+
+<script>
+let pc = new RTCPeerConnection();
+let channel;
+let aesKey;
+let myKeys;
+
+async function initKeys() {
+  myKeys = await crypto.subtle.generateKey(
+    { name: "ECDH", namedCurve: "P-256" },
+    true,
+    ["deriveKey"]
+  );
+}
+initKeys();
+
+function startApp() {
+  document.getElementById("intro").style.display = "none";
+  document.getElementById("setup").style.display = "block";
+}
+
+pc.ondatachannel = e => {
+  channel = e.channel;
+  setupChannel();
+};
+
+function setupChannel() {
+  channel.onmessage = async e => {
+    const data = JSON.parse(e.data);
+    const iv = Uint8Array.from(atob(data.iv), c => c.charCodeAt(0));
+    const buf = Uint8Array.from(atob(data.msg), c => c.charCodeAt(0));
+    const dec = await crypto.subtle.decrypt({name:"AES-GCM", iv}, aesKey, buf);
+    const text = new TextDecoder().decode(dec);
+    addMsg("peer", text);
+  };
+}
+
+function addMsg(who, text) {
+  const div = document.createElement("div");
+  div.className = who === "you" ? "msg-you" : "msg-peer";
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+
+  div.appendChild(bubble);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+}
+
+async function createOffer() {
+  channel = pc.createDataChannel("chat");
+  setupChannel();
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  const pub = await crypto.subtle.exportKey("jwk", myKeys.publicKey);
+  signal.value = JSON.stringify({ sdp: pc.localDescription, pub });
+}
+
+async function applyRemote() {
+  const data = JSON.parse(signal.value);
+  await pc.setRemoteDescription(data.sdp);
+
+  const key = await crypto.subtle.importKey(
+    "jwk", data.pub, {name:"ECDH", namedCurve:"P-256"}, true, []
+  );
+
+  aesKey = await crypto.subtle.deriveKey(
+    {name:"ECDH", public:key},
+    myKeys.privateKey,
+    {name:"AES-GCM", length:256},
+    false,
+    ["encrypt","decrypt"]
+  );
+
+  if (data.sdp.type === "offer") {
+    const ans = await pc.createAnswer();
+    await pc.setLocalDescription(ans);
+    const pub = await crypto.subtle.exportKey("jwk", myKeys.publicKey);
+    signal.value = JSON.stringify({ sdp: pc.localDescription, pub });
+  } else {
+    document.getElementById("setup").style.display = "none";
+    document.getElementById("chatContainer").style.display = "flex";
+  }
+}
+
+async function sendMsg() {
+  const text = msg.value.trim();
+  if (!text) return;
+  msg.value = "";
+
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const enc = await crypto.subtle.encrypt(
+    {name:"AES-GCM", iv},
+    aesKey,
+    new TextEncoder().encode(text)
+  );
+
+  channel.send(JSON.stringify({
+    iv: btoa(String.fromCharCode(...iv)),
+    msg: btoa(String.fromCharCode(...new Uint8Array(enc)))
+  }));
+
+  addMsg("you", text);
+}
+</script>
+</body>
+</html>
